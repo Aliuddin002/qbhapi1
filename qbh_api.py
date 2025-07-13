@@ -1,44 +1,41 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-import uvicorn
+import os
+import gdown
 import numpy as np
 import pandas as pd
 import librosa
 import tensorflow as tf
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+import uvicorn
 import io
 import traceback
-import os
-import requests
-import shutil
 
 # ============ CONSTANTS ============ #
 SAMPLE_RATE = 22050
-TARGET_SHAPE = (128, 216)  # n_mels × frames (~5 s)
+TARGET_SHAPE = (128, 216)
 TOP_N_DEFAULT = 5
-
-# ============ MODEL DOWNLOAD SETUP ============ #
-MODEL_URL = "https://drive.google.com/uc?export=download&id=1xL8fy4lyvjBARw_EXJHt8h0ChZTqaYQX"
 MODEL_PATH = "trained_encoder.h5"
+GDRIVE_URL = "https://drive.google.com/uc?id=1xL8fy4lyvjBARw_EXJHt8h0ChZTqaYQX"
 
+# ============ MODEL DOWNLOAD ============ #
 def download_model():
-    """Download trained_encoder.h5 if not already present."""
-    if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1_000_000:
-        print("✅ Model already exists.")
-        return
-    print("⬇️ Downloading trained_encoder.h5 ...")
+    print("✅ Model not found. Starting download from Google Drive...")
     try:
-        with requests.get(MODEL_URL, stream=True) as r:
-            r.raise_for_status()
-            with open(MODEL_PATH + ".tmp", "wb") as f:
-                shutil.copyfileobj(r.raw, f)
-        os.rename(MODEL_PATH + ".tmp", MODEL_PATH)
-        print("✅ Model downloaded.")
+        output = gdown.download(GDRIVE_URL, MODEL_PATH, quiet=False)
+        if output is None or not os.path.exists(MODEL_PATH):
+            raise RuntimeError("❌ Download failed. File not found after download.")
+        print("✅ Model download complete.")
     except Exception as e:
-        print("❌ Failed to download model:", e)
-        raise
+        print("❌ Error during model download:", str(e))
+        raise e
+
+if not os.path.exists(MODEL_PATH):
+    download_model()
+else:
+    print("✅ Model already exists. Skipping download.")
 
 # ============ INITIALISE APP ============ #
-app = FastAPI(title="Query‑by‑Humming API",
+app = FastAPI(title="Query-by-Humming API",
               description="Returns top matching tracks from FMA-small for a 5-second hum.",
               version="1.0.0")
 
@@ -47,8 +44,6 @@ try:
     track_df = pd.read_csv("track_df_cleaned.csv")
     features_array = np.load("qbh_features.npy")
     features_index = pd.read_csv("qbh_features_index.csv")
-
-    download_model()
     encoder = tf.keras.models.load_model(MODEL_PATH, compile=False)
 except Exception as e:
     print("[FATAL] Could not load model or data — check file paths.")
@@ -59,13 +54,16 @@ except Exception as e:
 def audio_to_mel(audio: np.ndarray, sr: int = SAMPLE_RATE) -> np.ndarray:
     mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=TARGET_SHAPE[0], hop_length=512)
     mel_db = librosa.power_to_db(mel, ref=np.max)
+
     pitches, mags = librosa.piptrack(y=audio, sr=sr, hop_length=512)
     voiced = np.max(mags, axis=0) > np.percentile(mags, 75)
     mel_db[:, voiced] *= 1.5
+
     if mel_db.shape[1] < TARGET_SHAPE[1]:
         mel_db = np.pad(mel_db, ((0, 0), (0, TARGET_SHAPE[1] - mel_db.shape[1])), mode="constant")
     else:
         mel_db = mel_db[:, :TARGET_SHAPE[1]]
+
     mel_db -= mel_db.min()
     if mel_db.max() > 0:
         mel_db /= mel_db.max()
@@ -83,6 +81,7 @@ def match_tracks(query_vector, features_array, top_n=5):
     similarities = np.dot(features_array, query_vector)
     similarities /= np.linalg.norm(features_array, axis=1) * np.linalg.norm(query_vector)
     sorted_idx = np.argsort(similarities)[::-1][:top_n]
+
     results = []
     for rank, i in enumerate(sorted_idx, start=1):
         try:
@@ -121,6 +120,6 @@ async def qbh_endpoint(file: UploadFile = File(...), top_n: int = TOP_N_DEFAULT)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============ MAIN ============ #
+# ============ MAIN (for local run) ============ #
 if __name__ == "__main__":
     uvicorn.run("qbh_api:app", host="0.0.0.0", port=8000, reload=True)

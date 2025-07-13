@@ -7,3 +7,4 @@ scipy
 noisereduce
 librosa==0.11.0
 python-multipart
+gdown
